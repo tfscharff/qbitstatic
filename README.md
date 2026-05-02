@@ -1,3 +1,3 @@
-# protonqbit
+# qbitstatic
 
 A new project.
