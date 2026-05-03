@@ -95,21 +95,32 @@ function Get-QbtCredentials {
 }
 
 # === PORT DETECTOR ===
+$script:LastLogTime = [DateTime]::MinValue
+
 function Get-ProtonVpnPort {
     $logFile = "$env:LOCALAPPDATA\Proton\Proton VPN\Logs\client-logs.txt"
     if (-not (Test-Path $logFile)) { return $null }
 
-    $tmp = "$env:TEMP\protonvpn_log_copy.txt"
-    try { Copy-Item $logFile $tmp -Force -ErrorAction Stop } catch { return $null }
+    # Skip read if file unchanged
+    $modTime = (Get-Item $logFile).LastWriteTime
+    if ($modTime -eq $script:LastLogTime) { return $script:LastVpnPort }
+    $script:LastLogTime = $modTime
 
     try {
-        $text = [IO.File]::ReadAllText($tmp, [Text.Encoding]::UTF8)
+        # Read only last 50KB for efficiency
+        $stream = [IO.File]::Open($logFile, 'Open', 'Read', 'ReadWrite')
+        $size = [Math]::Min($stream.Length, 51200)
+        $stream.Seek(-$size, 'End') | Out-Null
+        $reader = [IO.StreamReader]::new($stream)
+        $text = $reader.ReadToEnd()
+        $reader.Close()
+
         $m = [regex]::Matches($text, "Port pair (\d+)->")
         if ($m.Count -gt 0) {
             $port = [int]$m[$m.Count-1].Groups[1].Value
-            if ($port -ge 1024 -and $port -le 65535) { return $port }
+            if ($port -ge 1024 -and $port -le 65535) { $script:LastVpnPort = $port; return $port }
         }
-    } catch {} finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    } catch {}
     return $null
 }
 
@@ -149,13 +160,6 @@ function Set-QBittorrentPort([int]$Port) {
 
 function Restart-QBittorrent {
     Write-Log "Restarting qBittorrent..."
-    # Ensure qBittorrent starts minimized to tray
-    try {
-        Invoke-WebRequest -Uri "$QBT_WEB_URL/api/v2/app/setPreferences" -Method POST -Body @{
-            json = (@{start_minimized=$true; minimize_to_tray=$true; systray_enabled=$true} | ConvertTo-Json -Compress)
-        } -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 5 | Out-Null
-    } catch {}
-
     try { Invoke-WebRequest -Uri "$QBT_WEB_URL/api/v2/app/shutdown" -Method POST -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 5 | Out-Null } catch {}
 
     # Wait for graceful shutdown, then force kill if still running
@@ -183,14 +187,14 @@ function Start-PortMonitor {
             $vpnPort = Get-ProtonVpnPort
             if ($vpnPort -and $vpnPort -ne $lastPort) {
                 Write-Log "VPN port: $vpnPort"
-                if ((Connect-QBittorrent $cred)) {
-                    $qbtPort = Get-QBittorrentPort
-                    if ($qbtPort -and $vpnPort -ne $qbtPort) {
-                        Write-Log "Updating: VPN=$vpnPort, qBt=$qbtPort"
-                        if (Set-QBittorrentPort $vpnPort) { Restart-QBittorrent; Start-Sleep 5 }
-                    }
-                    $lastPort = $vpnPort
+                # Reconnect only if session invalid
+                if (-not $script:QbtSession -or -not (Get-QBittorrentPort)) { Connect-QBittorrent $cred | Out-Null }
+                $qbtPort = Get-QBittorrentPort
+                if ($qbtPort -and $vpnPort -ne $qbtPort) {
+                    Write-Log "Updating: VPN=$vpnPort, qBt=$qbtPort"
+                    if (Set-QBittorrentPort $vpnPort) { Restart-QBittorrent; $script:QbtSession = $null; Start-Sleep 5 }
                 }
+                $lastPort = $vpnPort
             }
         } catch { Write-Log "Error: $_" -Level ERROR }
         Start-Sleep -Seconds $POLL_INTERVAL_SECONDS

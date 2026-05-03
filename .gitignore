@@ -1,0 +1,15 @@
+# Logs
+*.log
+
+# Temp files
+*.tmp
+*.temp
+
+# Editor
+*.swp
+*~
+.vscode/
+
+# Windows
+Thumbs.db
+Desktop.ini
