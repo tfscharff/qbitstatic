@@ -370,3 +370,78 @@ function Restart-QBittorrent {
     # Start qBittorrent
     return Start-QBittorrent
 }
+
+# ============================================================================
+# MAIN LOOP
+# ============================================================================
+
+function Start-PortMonitor {
+    Initialize-LogDirectory
+    Write-Log "qbitstatic starting..." -Level INFO
+
+    # Get stored credentials
+    $credential = Get-QbtCredentials
+    if (-not $credential) {
+        Write-Log "No credentials found. Run with -Install to configure." -Level ERROR
+        exit 1
+    }
+
+    $lastPort = $null
+
+    while ($true) {
+        try {
+            # Get ProtonVPN port
+            $vpnPort = Get-ProtonVpnPort
+
+            if (-not $vpnPort) {
+                # No port found, wait and retry
+                Start-Sleep -Seconds $POLL_INTERVAL_SECONDS
+                continue
+            }
+
+            # Check if port changed
+            if ($vpnPort -eq $lastPort) {
+                Start-Sleep -Seconds $POLL_INTERVAL_SECONDS
+                continue
+            }
+
+            Write-Log "ProtonVPN port detected: $vpnPort" -Level INFO
+
+            # Connect to qBittorrent
+            $connected = Connect-QBittorrent -Credential $credential
+            if (-not $connected) {
+                Write-Log "qBittorrent not available, will retry" -Level WARN
+                Start-Sleep -Seconds $POLL_INTERVAL_SECONDS
+                continue
+            }
+
+            # Get current qBittorrent port
+            $qbtPort = Get-QBittorrentPort
+            if (-not $qbtPort) {
+                Start-Sleep -Seconds $POLL_INTERVAL_SECONDS
+                continue
+            }
+
+            # Update if different
+            if ($vpnPort -ne $qbtPort) {
+                Write-Log "Port mismatch: VPN=$vpnPort, qBittorrent=$qbtPort. Updating..." -Level INFO
+
+                $updated = Set-QBittorrentPort -Port $vpnPort
+                if ($updated) {
+                    Restart-QBittorrent
+                    $lastPort = $vpnPort
+
+                    # Wait extra time for qBittorrent to restart
+                    Start-Sleep -Seconds 5
+                }
+            } else {
+                $lastPort = $vpnPort
+            }
+
+        } catch {
+            Write-Log "Error in monitoring loop: $_" -Level ERROR
+        }
+
+        Start-Sleep -Seconds $POLL_INTERVAL_SECONDS
+    }
+}
