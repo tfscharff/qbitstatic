@@ -36,39 +36,59 @@ function Write-Log {
 # === CREDENTIALS ===
 $script:CredApiLoaded = $false
 
-function Save-QbtCredentials([PSCredential]$Credential) {
-    cmdkey /delete:$CREDENTIAL_TARGET 2>$null | Out-Null
-    $u = $Credential.UserName; $p = $Credential.GetNetworkCredential().Password
-    $null = cmdkey /add:$CREDENTIAL_TARGET /user:$u /pass:$p
-    if ($LASTEXITCODE -ne 0) { throw "Failed to save credentials" }
-    Write-Log "Credentials saved to Windows Credential Manager"
-}
-
-function Get-QbtCredentials {
-    if ((cmdkey /list:$CREDENTIAL_TARGET 2>&1) -match "not found") { return $null }
-
-    if (-not $script:CredApiLoaded) {
-        Add-Type -MemberDefinition @"
+function Initialize-CredApi {
+    if ($script:CredApiLoaded) { return }
+    Add-Type -MemberDefinition @"
+[DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+public static extern bool CredWrite(ref CREDENTIAL cred, int flags);
 [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
 public static extern bool CredRead(string target, int type, int reserved, out IntPtr cred);
+[DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+public static extern bool CredDelete(string target, int type, int reserved);
 [DllImport("advapi32.dll")] public static extern void CredFree(IntPtr cred);
 [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
 public struct CREDENTIAL {
     public int Flags, Type; public string TargetName, Comment;
-    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+    public long LastWritten;
     public int CredentialBlobSize; public IntPtr CredentialBlob;
     public int Persist, AttributeCount; public IntPtr Attributes;
     public string TargetAlias, UserName;
 }
 "@ -Namespace CredManager -Name Api -ErrorAction SilentlyContinue
-        $script:CredApiLoaded = $true
-    }
+    $script:CredApiLoaded = $true
+}
 
+function Save-QbtCredentials([PSCredential]$Credential) {
+    Initialize-CredApi
+    $pw = $Credential.GetNetworkCredential().Password
+    $pwBytes = [Text.Encoding]::Unicode.GetBytes($pw)
+    $blob = [Runtime.InteropServices.Marshal]::AllocHGlobal($pwBytes.Length)
+    [Runtime.InteropServices.Marshal]::Copy($pwBytes, 0, $blob, $pwBytes.Length)
+
+    $cred = New-Object CredManager.Api+CREDENTIAL
+    $cred.Type = 1  # CRED_TYPE_GENERIC
+    $cred.TargetName = $CREDENTIAL_TARGET
+    $cred.UserName = $Credential.UserName
+    $cred.CredentialBlob = $blob
+    $cred.CredentialBlobSize = $pwBytes.Length
+    $cred.Persist = 2  # CRED_PERSIST_LOCAL_MACHINE
+
+    try {
+        if (-not [CredManager.Api]::CredWrite([ref]$cred, 0)) {
+            throw "CredWrite failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+        }
+        Write-Log "Credentials saved to Windows Credential Manager"
+    } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($blob) }
+}
+
+function Get-QbtCredentials {
+    Initialize-CredApi
     $ptr = [IntPtr]::Zero
     if (-not [CredManager.Api]::CredRead($CREDENTIAL_TARGET, 1, 0, [ref]$ptr)) { return $null }
 
     try {
         $c = [Runtime.InteropServices.Marshal]::PtrToStructure($ptr, [Type][CredManager.Api+CREDENTIAL])
+        if ($c.CredentialBlobSize -eq 0) { return $null }
         $pw = [Runtime.InteropServices.Marshal]::PtrToStringUni($c.CredentialBlob, $c.CredentialBlobSize/2)
         return [PSCredential]::new($c.UserName, (ConvertTo-SecureString $pw -AsPlainText -Force))
     } finally { [CredManager.Api]::CredFree($ptr) }
@@ -76,15 +96,15 @@ public struct CREDENTIAL {
 
 # === PORT DETECTOR ===
 function Get-ProtonVpnPort {
-    $db = "$env:LOCALAPPDATA\Microsoft\Windows\Notifications\wpndatabase.db"
-    if (-not (Test-Path $db)) { return $null }
+    $logFile = "$env:LOCALAPPDATA\Proton\Proton VPN\Logs\client-logs.txt"
+    if (-not (Test-Path $logFile)) { return $null }
 
-    $tmp = "$env:TEMP\wpn_copy.db"
-    try { Copy-Item $db $tmp -Force -ErrorAction Stop } catch { return $null }
+    $tmp = "$env:TEMP\protonvpn_log_copy.txt"
+    try { Copy-Item $logFile $tmp -Force -ErrorAction Stop } catch { return $null }
 
     try {
         $text = [IO.File]::ReadAllText($tmp, [Text.Encoding]::UTF8)
-        $m = [regex]::Matches($text, "Active port number[:\s]+(\d{4,5})")
+        $m = [regex]::Matches($text, "Port pair (\d+)->")
         if ($m.Count -gt 0) {
             $port = [int]$m[$m.Count-1].Groups[1].Value
             if ($port -ge 1024 -and $port -le 65535) { return $port }
