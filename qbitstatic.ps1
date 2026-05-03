@@ -28,3 +28,39 @@ $LOG_MAX_SIZE_MB = 1
 # ============================================================================
 # END CONFIGURATION
 # ============================================================================
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+function Initialize-LogDirectory {
+    if (-not (Test-Path $LOG_DIR)) {
+        New-Item -ItemType Directory -Path $LOG_DIR -Force | Out-Null
+    }
+}
+
+function Write-Log {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message,
+        [ValidateSet("INFO", "WARN", "ERROR")]
+        [string]$Level = "INFO"
+    )
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$Level] $Message"
+
+    # Rotate log if too large
+    if (Test-Path $LOG_FILE) {
+        $logSize = (Get-Item $LOG_FILE).Length / 1MB
+        if ($logSize -gt $LOG_MAX_SIZE_MB) {
+            $backupPath = "$LOG_FILE.old"
+            if (Test-Path $backupPath) {
+                Remove-Item $backupPath -Force
+            }
+            Rename-Item $LOG_FILE $backupPath
+        }
+    }
+
+    Add-Content -Path $LOG_FILE -Value $logEntry
+}
