@@ -445,3 +445,84 @@ function Start-PortMonitor {
         Start-Sleep -Seconds $POLL_INTERVAL_SECONDS
     }
 }
+
+# ============================================================================
+# INSTALLATION
+# ============================================================================
+
+function Install-QbitStatic {
+    Write-Host "qbitstatic Installation" -ForegroundColor Cyan
+    Write-Host "========================" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Check if qBittorrent exists
+    if (-not (Test-Path $QBT_EXE_PATH)) {
+        Write-Host "WARNING: qBittorrent not found at: $QBT_EXE_PATH" -ForegroundColor Yellow
+        Write-Host "Edit the QBT_EXE_PATH variable in this script if installed elsewhere." -ForegroundColor Yellow
+        Write-Host ""
+    }
+
+    # Prompt for credentials
+    Write-Host "Enter your qBittorrent Web UI credentials:" -ForegroundColor White
+    $credential = Get-Credential -Message "qBittorrent Web UI Login"
+
+    if (-not $credential) {
+        Write-Host "Installation cancelled." -ForegroundColor Red
+        exit 1
+    }
+
+    # Save credentials
+    try {
+        Save-QbtCredentials -Credential $credential
+        Write-Host "Credentials saved to Windows Credential Manager." -ForegroundColor Green
+    } catch {
+        Write-Host "Failed to save credentials: $_" -ForegroundColor Red
+        exit 1
+    }
+
+    # Create scheduled task
+    $scriptPath = $MyInvocation.PSCommandPath
+    if (-not $scriptPath) {
+        $scriptPath = $PSCommandPath
+    }
+
+    $taskName = "qbitstatic"
+    $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`""
+    $taskTrigger = New-ScheduledTaskTrigger -AtLogon
+    $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    $taskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+
+    # Remove existing task if present
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+
+    # Create new task
+    try {
+        Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $taskTrigger -Settings $taskSettings -Principal $taskPrincipal | Out-Null
+        Write-Host "Scheduled task created: $taskName" -ForegroundColor Green
+    } catch {
+        Write-Host "Failed to create scheduled task: $_" -ForegroundColor Red
+        exit 1
+    }
+
+    # Initialize log directory
+    Initialize-LogDirectory
+
+    Write-Host ""
+    Write-Host "Installation complete!" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "The service will start automatically at next login." -ForegroundColor White
+    Write-Host "To start now, run: .\qbitstatic.ps1" -ForegroundColor White
+    Write-Host "To uninstall, run: .\uninstall.ps1" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Log file: $LOG_FILE" -ForegroundColor Gray
+}
+
+# ============================================================================
+# ENTRY POINT
+# ============================================================================
+
+if ($Install) {
+    Install-QbitStatic
+} else {
+    Start-PortMonitor
+}
