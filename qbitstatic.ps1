@@ -149,6 +149,13 @@ function Set-QBittorrentPort([int]$Port) {
 
 function Restart-QBittorrent {
     Write-Log "Restarting qBittorrent..."
+    # Ensure qBittorrent starts minimized to tray
+    try {
+        Invoke-WebRequest -Uri "$QBT_WEB_URL/api/v2/app/setPreferences" -Method POST -Body @{
+            json = (@{start_minimized=$true; minimize_to_tray=$true; systray_enabled=$true} | ConvertTo-Json -Compress)
+        } -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 5 | Out-Null
+    } catch {}
+
     try { Invoke-WebRequest -Uri "$QBT_WEB_URL/api/v2/app/shutdown" -Method POST -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 5 | Out-Null } catch {}
 
     # Wait for graceful shutdown, then force kill if still running
@@ -159,7 +166,7 @@ function Restart-QBittorrent {
     Get-Process -Name qbittorrent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 
-    if (Test-Path $QBT_EXE_PATH) { Start-Process $QBT_EXE_PATH -WindowStyle Minimized; Write-Log "qBittorrent restarted" }
+    if (Test-Path $QBT_EXE_PATH) { Start-Process $QBT_EXE_PATH; Write-Log "qBittorrent restarted" }
 }
 
 # === MAIN LOOP ===
