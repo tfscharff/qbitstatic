@@ -150,10 +150,16 @@ function Set-QBittorrentPort([int]$Port) {
 function Restart-QBittorrent {
     Write-Log "Restarting qBittorrent..."
     try { Invoke-WebRequest -Uri "$QBT_WEB_URL/api/v2/app/shutdown" -Method POST -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 5 | Out-Null } catch {}
-    Start-Sleep -Seconds 2
+
+    # Wait for graceful shutdown, then force kill if still running
+    for ($i = 0; $i -lt 10; $i++) {
+        Start-Sleep -Milliseconds 500
+        if (-not (Get-Process -Name qbittorrent -ErrorAction SilentlyContinue)) { break }
+    }
     Get-Process -Name qbittorrent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
-    if (Test-Path $QBT_EXE_PATH) { Start-Process $QBT_EXE_PATH; Write-Log "qBittorrent started" }
+
+    if (Test-Path $QBT_EXE_PATH) { Start-Process $QBT_EXE_PATH; Write-Log "qBittorrent restarted" }
 }
 
 # === MAIN LOOP ===
