@@ -64,3 +64,97 @@ function Write-Log {
 
     Add-Content -Path $LOG_FILE -Value $logEntry
 }
+
+# ============================================================================
+# CREDENTIAL MANAGEMENT
+# ============================================================================
+
+function Save-QbtCredentials {
+    param(
+        [Parameter(Mandatory)]
+        [PSCredential]$Credential
+    )
+
+    # Remove existing credential if present
+    try {
+        cmdkey /delete:$CREDENTIAL_TARGET 2>$null | Out-Null
+    } catch {}
+
+    # Store new credential
+    $username = $Credential.UserName
+    $password = $Credential.GetNetworkCredential().Password
+
+    $result = cmdkey /add:$CREDENTIAL_TARGET /user:$username /pass:$password
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to save credentials to Windows Credential Manager"
+    }
+
+    Write-Log "Credentials saved to Windows Credential Manager" -Level INFO
+}
+
+function Get-QbtCredentials {
+    # Query credential manager
+    $cmdkeyOutput = cmdkey /list:$CREDENTIAL_TARGET 2>&1
+
+    if ($cmdkeyOutput -match "not found") {
+        return $null
+    }
+
+    # Parse the stored credential using VaultCmd approach
+    # Unfortunately cmdkey doesn't return passwords, so we use .NET
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+
+    # Use CredRead API via P/Invoke
+    $signature = @"
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CredRead(string target, int type, int reserved, out IntPtr credential);
+
+    [DllImport("advapi32.dll")]
+    public static extern void CredFree(IntPtr credential);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct CREDENTIAL {
+        public int Flags;
+        public int Type;
+        public string TargetName;
+        public string Comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public int CredentialBlobSize;
+        public IntPtr CredentialBlob;
+        public int Persist;
+        public int AttributeCount;
+        public IntPtr Attributes;
+        public string TargetAlias;
+        public string UserName;
+    }
+"@
+
+    try {
+        Add-Type -MemberDefinition $signature -Namespace "CredManager" -Name "Api" -ErrorAction Stop
+    } catch {
+        # Type already added
+    }
+
+    $credPtr = [IntPtr]::Zero
+    $success = [CredManager.Api]::CredRead($CREDENTIAL_TARGET, 1, 0, [ref]$credPtr)
+
+    if (-not $success) {
+        return $null
+    }
+
+    try {
+        $cred = [System.Runtime.InteropServices.Marshal]::PtrToStructure($credPtr, [Type][CredManager.Api+CREDENTIAL])
+        $password = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($cred.CredentialBlob, $cred.CredentialBlobSize / 2)
+        $username = $cred.UserName
+
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+        return New-Object PSCredential($username, $securePassword)
+    } finally {
+        [CredManager.Api]::CredFree($credPtr)
+    }
+}
+
+function Remove-QbtCredentials {
+    cmdkey /delete:$CREDENTIAL_TARGET 2>$null | Out-Null
+    Write-Log "Credentials removed from Windows Credential Manager" -Level INFO
+}
