@@ -159,7 +159,7 @@ function Restart-QBittorrent {
     Get-Process -Name qbittorrent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 
-    if (Test-Path $QBT_EXE_PATH) { Start-Process $QBT_EXE_PATH; Write-Log "qBittorrent restarted" }
+    if (Test-Path $QBT_EXE_PATH) { Start-Process $QBT_EXE_PATH -WindowStyle Minimized; Write-Log "qBittorrent restarted" }
 }
 
 # === MAIN LOOP ===
