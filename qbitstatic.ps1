@@ -235,3 +235,138 @@ function Get-ProtonVpnPortFallback {
         Remove-Item $tempDb -Force -ErrorAction SilentlyContinue
     }
 }
+
+# ============================================================================
+# QBITTORRENT API
+# ============================================================================
+
+$script:QbtSession = $null
+
+function Connect-QBittorrent {
+    param(
+        [Parameter(Mandatory)]
+        [PSCredential]$Credential
+    )
+
+    $loginUrl = "$QBT_WEB_URL/api/v2/auth/login"
+    $username = $Credential.UserName
+    $password = $Credential.GetNetworkCredential().Password
+
+    try {
+        $body = @{
+            username = $username
+            password = $password
+        }
+
+        $response = Invoke-WebRequest -Uri $loginUrl -Method POST -Body $body -SessionVariable session -UseBasicParsing -TimeoutSec 10
+
+        if ($response.Content -eq "Ok.") {
+            $script:QbtSession = $session
+            return $true
+        } else {
+            Write-Log "qBittorrent login failed: $($response.Content)" -Level ERROR
+            return $false
+        }
+    } catch {
+        Write-Log "qBittorrent connection failed: $_" -Level ERROR
+        return $false
+    }
+}
+
+function Get-QBittorrentPort {
+    if (-not $script:QbtSession) {
+        Write-Log "Not connected to qBittorrent" -Level ERROR
+        return $null
+    }
+
+    $prefsUrl = "$QBT_WEB_URL/api/v2/app/preferences"
+
+    try {
+        $response = Invoke-WebRequest -Uri $prefsUrl -Method GET -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 10
+        $prefs = $response.Content | ConvertFrom-Json
+        return $prefs.listen_port
+    } catch {
+        Write-Log "Failed to get qBittorrent port: $_" -Level ERROR
+        return $null
+    }
+}
+
+function Set-QBittorrentPort {
+    param(
+        [Parameter(Mandatory)]
+        [int]$Port
+    )
+
+    if (-not $script:QbtSession) {
+        Write-Log "Not connected to qBittorrent" -Level ERROR
+        return $false
+    }
+
+    $prefsUrl = "$QBT_WEB_URL/api/v2/app/setPreferences"
+
+    try {
+        $prefs = @{ listen_port = $Port } | ConvertTo-Json -Compress
+        $body = @{ json = $prefs }
+
+        $response = Invoke-WebRequest -Uri $prefsUrl -Method POST -Body $body -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 10
+
+        Write-Log "qBittorrent port updated to $Port" -Level INFO
+        return $true
+    } catch {
+        Write-Log "Failed to set qBittorrent port: $_" -Level ERROR
+        return $false
+    }
+}
+
+function Stop-QBittorrent {
+    if (-not $script:QbtSession) {
+        Write-Log "Not connected to qBittorrent" -Level ERROR
+        return $false
+    }
+
+    $shutdownUrl = "$QBT_WEB_URL/api/v2/app/shutdown"
+
+    try {
+        Invoke-WebRequest -Uri $shutdownUrl -Method POST -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 10 | Out-Null
+        Write-Log "qBittorrent shutdown requested" -Level INFO
+        return $true
+    } catch {
+        Write-Log "Failed to shutdown qBittorrent: $_" -Level WARN
+        return $false
+    }
+}
+
+function Start-QBittorrent {
+    if (-not (Test-Path $QBT_EXE_PATH)) {
+        Write-Log "qBittorrent executable not found at: $QBT_EXE_PATH" -Level ERROR
+        return $false
+    }
+
+    try {
+        Start-Process -FilePath $QBT_EXE_PATH
+        Write-Log "qBittorrent started" -Level INFO
+        return $true
+    } catch {
+        Write-Log "Failed to start qBittorrent: $_" -Level ERROR
+        return $false
+    }
+}
+
+function Restart-QBittorrent {
+    Write-Log "Restarting qBittorrent..." -Level INFO
+
+    # Try graceful shutdown via API
+    $stopped = Stop-QBittorrent
+
+    if (-not $stopped) {
+        # Force kill if API shutdown failed
+        Write-Log "Forcing qBittorrent shutdown..." -Level WARN
+        Get-Process -Name "qbittorrent" -ErrorAction SilentlyContinue | Stop-Process -Force
+    }
+
+    # Wait for process to exit
+    Start-Sleep -Seconds 2
+
+    # Start qBittorrent
+    return Start-QBittorrent
+}
