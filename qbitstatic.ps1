@@ -4,232 +4,254 @@
     Syncs ProtonVPN port forwarding port to qBittorrent.
 .PARAMETER Install
     Run installation: prompt for credentials, create scheduled task.
+.PARAMETER Uninstall
+    Remove scheduled task and credentials.
+.PARAMETER Status
+    Show current status (VPN port, qBittorrent port, connection state).
 #>
-param([switch]$Install)
+param(
+    [switch]$Install,
+    [switch]$Uninstall,
+    [switch]$Status
+)
 
-# === CONFIGURATION ===
-$QBT_EXE_PATH = "C:\Program Files\qBittorrent\qbittorrent.exe"
-$QBT_WEB_URL = "http://localhost:8080"
-$POLL_INTERVAL_SECONDS = 30
-$CREDENTIAL_TARGET = "qbitstatic-qbittorrent"
-$LOG_DIR = "$env:LOCALAPPDATA\qbitstatic"
-$LOG_FILE = "$LOG_DIR\qbitstatic.log"
-$LOG_MAX_SIZE_MB = 1
+$ErrorActionPreference = "Stop"
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# === LOGGING ===
-$script:LogCheckCounter = 0
+# Import modules
+Import-Module "$ScriptDir\modules\Config.psm1" -Force
+Import-Module "$ScriptDir\modules\Logging.psm1" -Force
+Import-Module "$ScriptDir\modules\Credentials.psm1" -Force
+Import-Module "$ScriptDir\modules\PortDetector.psm1" -Force
+Import-Module "$ScriptDir\modules\QBittorrentApi.psm1" -Force
 
-function Write-Log {
-    param([string]$Message, [string]$Level = "INFO")
+# Load configuration
+$Config = Get-QbitstaticConfig -Path "$ScriptDir\config.json"
 
-    # Check log size every 100 writes instead of every write
-    if (++$script:LogCheckCounter -ge 100) {
-        $script:LogCheckCounter = 0
-        if ((Test-Path $LOG_FILE) -and ((Get-Item $LOG_FILE).Length / 1MB) -gt $LOG_MAX_SIZE_MB) {
-            Remove-Item "$LOG_FILE.old" -Force -ErrorAction SilentlyContinue
-            Rename-Item $LOG_FILE "$LOG_FILE.old" -ErrorAction SilentlyContinue
-        }
-    }
-    Add-Content -Path $LOG_FILE -Value "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message"
-}
+# Initialize modules
+Initialize-Logging -LogDir $Config.LogDir -LogFile $Config.LogFile -MaxSizeMB $Config.LogMaxSizeMB -CheckInterval $Config.LogCheckInterval
+Initialize-CredentialApi -Target $Config.CredentialTarget
+Initialize-PortDetector -LogPath $Config.VpnLogPath -Pattern $Config.PortPattern
+Initialize-QBittorrentApi -WebUrl $Config.QbtWebUrl -ExePath $Config.QbtExePath -MaxRetries $Config.MaxRetries -RetryDelaySeconds $Config.RetryDelay
 
-# === CREDENTIALS ===
-$script:CredApiLoaded = $false
+# === MAIN FUNCTIONS ===
 
-function Initialize-CredApi {
-    if ($script:CredApiLoaded) { return }
-    Add-Type -MemberDefinition @"
-[DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-public static extern bool CredWrite(ref CREDENTIAL cred, int flags);
-[DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-public static extern bool CredRead(string target, int type, int reserved, out IntPtr cred);
-[DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-public static extern bool CredDelete(string target, int type, int reserved);
-[DllImport("advapi32.dll")] public static extern void CredFree(IntPtr cred);
-[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
-public struct CREDENTIAL {
-    public int Flags, Type; public string TargetName, Comment;
-    public long LastWritten;
-    public int CredentialBlobSize; public IntPtr CredentialBlob;
-    public int Persist, AttributeCount; public IntPtr Attributes;
-    public string TargetAlias, UserName;
-}
-"@ -Namespace CredManager -Name Api -ErrorAction SilentlyContinue
-    $script:CredApiLoaded = $true
-}
-
-function Save-QbtCredentials([PSCredential]$Credential) {
-    Initialize-CredApi
-    $pw = $Credential.GetNetworkCredential().Password
-    $pwBytes = [Text.Encoding]::Unicode.GetBytes($pw)
-    $blob = [Runtime.InteropServices.Marshal]::AllocHGlobal($pwBytes.Length)
-    [Runtime.InteropServices.Marshal]::Copy($pwBytes, 0, $blob, $pwBytes.Length)
-
-    $cred = New-Object CredManager.Api+CREDENTIAL
-    $cred.Type = 1  # CRED_TYPE_GENERIC
-    $cred.TargetName = $CREDENTIAL_TARGET
-    $cred.UserName = $Credential.UserName
-    $cred.CredentialBlob = $blob
-    $cred.CredentialBlobSize = $pwBytes.Length
-    $cred.Persist = 2  # CRED_PERSIST_LOCAL_MACHINE
-
-    try {
-        if (-not [CredManager.Api]::CredWrite([ref]$cred, 0)) {
-            throw "CredWrite failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-        }
-        Write-Log "Credentials saved to Windows Credential Manager"
-    } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($blob) }
-}
-
-function Get-QbtCredentials {
-    Initialize-CredApi
-    $ptr = [IntPtr]::Zero
-    if (-not [CredManager.Api]::CredRead($CREDENTIAL_TARGET, 1, 0, [ref]$ptr)) { return $null }
-
-    try {
-        $c = [Runtime.InteropServices.Marshal]::PtrToStructure($ptr, [Type][CredManager.Api+CREDENTIAL])
-        if ($c.CredentialBlobSize -eq 0) { return $null }
-        $pw = [Runtime.InteropServices.Marshal]::PtrToStringUni($c.CredentialBlob, $c.CredentialBlobSize/2)
-        return [PSCredential]::new($c.UserName, (ConvertTo-SecureString $pw -AsPlainText -Force))
-    } finally { [CredManager.Api]::CredFree($ptr) }
-}
-
-# === PORT DETECTOR ===
-$script:LastLogTime = [DateTime]::MinValue
-
-function Get-ProtonVpnPort {
-    $logFile = "$env:LOCALAPPDATA\Proton\Proton VPN\Logs\client-logs.txt"
-    if (-not (Test-Path $logFile)) { return $null }
-
-    # Skip read if file unchanged
-    $modTime = (Get-Item $logFile).LastWriteTime
-    if ($modTime -eq $script:LastLogTime) { return $script:LastVpnPort }
-    $script:LastLogTime = $modTime
-
-    try {
-        # Read only last 50KB for efficiency
-        $stream = [IO.File]::Open($logFile, 'Open', 'Read', 'ReadWrite')
-        $size = [Math]::Min($stream.Length, 51200)
-        $stream.Seek(-$size, 'End') | Out-Null
-        $reader = [IO.StreamReader]::new($stream)
-        $text = $reader.ReadToEnd()
-        $reader.Close()
-
-        $m = [regex]::Matches($text, "Port pair (\d+)->")
-        if ($m.Count -gt 0) {
-            $port = [int]$m[$m.Count-1].Groups[1].Value
-            if ($port -ge 1024 -and $port -le 65535) { $script:LastVpnPort = $port; return $port }
-        }
-    } catch {}
-    return $null
-}
-
-# === QBITTORRENT API ===
-$script:QbtSession = $null
-
-function Connect-QBittorrent([PSCredential]$Credential) {
-    try {
-        $r = Invoke-WebRequest -Uri "$QBT_WEB_URL/api/v2/auth/login" -Method POST -Body @{
-            username = $Credential.UserName
-            password = $Credential.GetNetworkCredential().Password
-        } -SessionVariable s -UseBasicParsing -TimeoutSec 10
-        if ($r.Content -eq "Ok.") { $script:QbtSession = $s; return $true }
-    } catch {}
-    Write-Log "qBittorrent connection failed" -Level ERROR
-    return $false
-}
-
-function Get-QBittorrentPort {
-    if (-not $script:QbtSession) { return $null }
-    try {
-        $r = Invoke-WebRequest -Uri "$QBT_WEB_URL/api/v2/app/preferences" -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 10
-        return ($r.Content | ConvertFrom-Json).listen_port
-    } catch { return $null }
-}
-
-function Set-QBittorrentPort([int]$Port) {
-    if (-not $script:QbtSession) { return $false }
-    try {
-        Invoke-WebRequest -Uri "$QBT_WEB_URL/api/v2/app/setPreferences" -Method POST -Body @{
-            json = (@{listen_port=$Port} | ConvertTo-Json -Compress)
-        } -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 10 | Out-Null
-        Write-Log "Port updated to $Port"
-        return $true
-    } catch { Write-Log "Failed to set port" -Level ERROR; return $false }
-}
-
-function Restart-QBittorrent {
-    Write-Log "Restarting qBittorrent..."
-    try { Invoke-WebRequest -Uri "$QBT_WEB_URL/api/v2/app/shutdown" -Method POST -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 5 | Out-Null } catch {}
-
-    # Wait for graceful shutdown, then force kill if still running
-    for ($i = 0; $i -lt 10; $i++) {
-        Start-Sleep -Milliseconds 500
-        if (-not (Get-Process -Name qbittorrent -ErrorAction SilentlyContinue)) { break }
-    }
-    Get-Process -Name qbittorrent -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 1
-
-    if (Test-Path $QBT_EXE_PATH) { Start-Process $QBT_EXE_PATH; Write-Log "qBittorrent restarted" }
-}
-
-# === MAIN LOOP ===
 function Start-PortMonitor {
-    if (-not (Test-Path $LOG_DIR)) { New-Item -ItemType Directory -Path $LOG_DIR -Force | Out-Null }
-    Write-Log "qbitstatic starting..."
+    Write-Log "qbitstatic v2.0 starting..."
 
-    $cred = Get-QbtCredentials
-    if (-not $cred) { Write-Log "No credentials. Run with -Install" -Level ERROR; exit 1 }
+    $cred = Get-StoredCredential
+    if (-not $cred) {
+        Write-Log "No credentials found. Run with -Install" -Level ERROR
+        exit 1
+    }
 
     $lastPort = $null
+    $consecutiveErrors = 0
+    $maxConsecutiveErrors = 10
+
     while ($true) {
         try {
-            $vpnPort = Get-ProtonVpnPort
+            $vpnPort = Get-VpnPort
             if ($vpnPort -and $vpnPort -ne $lastPort) {
-                Write-Log "VPN port: $vpnPort"
-                # Reconnect only if session invalid
-                if (-not $script:QbtSession -or -not (Get-QBittorrentPort)) { Connect-QBittorrent $cred | Out-Null }
+                Write-Log "VPN port detected: $vpnPort"
+
+                # Reconnect if session invalid
+                if (-not (Test-QBittorrentConnection)) {
+                    Write-Log "Connecting to qBittorrent..."
+                    if (-not (Connect-QBittorrent -Credential $cred)) {
+                        Write-Log "Failed to connect to qBittorrent" -Level ERROR
+                        $consecutiveErrors++
+                        if ($consecutiveErrors -ge $maxConsecutiveErrors) {
+                            Write-Log "Too many consecutive errors, exiting" -Level ERROR
+                            exit 1
+                        }
+                        Start-Sleep -Seconds $Config.PollInterval
+                        continue
+                    }
+                }
+
                 $qbtPort = Get-QBittorrentPort
                 if ($qbtPort -and $vpnPort -ne $qbtPort) {
-                    Write-Log "Updating: VPN=$vpnPort, qBt=$qbtPort"
-                    if (Set-QBittorrentPort $vpnPort) { Restart-QBittorrent; $script:QbtSession = $null; Start-Sleep 5 }
+                    Write-Log "Port mismatch: VPN=$vpnPort, qBittorrent=$qbtPort. Updating..."
+                    if (Set-QBittorrentPort -Port $vpnPort) {
+                        Write-Log "Port updated successfully"
+                        Restart-QBittorrent
+                        Write-Log "qBittorrent restarted"
+                        Disconnect-QBittorrent
+                        Start-Sleep -Seconds 5
+                    }
+                    else {
+                        Write-Log "Failed to update port" -Level ERROR
+                    }
                 }
+
                 $lastPort = $vpnPort
+                $consecutiveErrors = 0
             }
-        } catch { Write-Log "Error: $_" -Level ERROR }
-        Start-Sleep -Seconds $POLL_INTERVAL_SECONDS
+        }
+        catch {
+            Write-Log "Error: $_" -Level ERROR
+            $consecutiveErrors++
+            if ($consecutiveErrors -ge $maxConsecutiveErrors) {
+                Write-Log "Too many consecutive errors, exiting" -Level ERROR
+                exit 1
+            }
+        }
+
+        Start-Sleep -Seconds $Config.PollInterval
     }
 }
 
-# === INSTALLATION ===
 function Install-QbitStatic {
     Write-Host "`nqbitstatic Installation`n" -ForegroundColor Cyan
 
-    if (-not (Test-Path $QBT_EXE_PATH)) {
-        Write-Host "WARNING: qBittorrent not found at $QBT_EXE_PATH" -ForegroundColor Yellow
+    if (-not (Test-Path $Config.QbtExePath)) {
+        Write-Host "WARNING: qBittorrent not found at $($Config.QbtExePath)" -ForegroundColor Yellow
+        Write-Host "Update config.json with correct path if needed.`n" -ForegroundColor Yellow
     }
 
     $cred = Get-Credential -Message "qBittorrent Web UI Login"
-    if (-not $cred) { Write-Host "Cancelled." -ForegroundColor Red; exit 1 }
+    if (-not $cred) {
+        Write-Host "Cancelled." -ForegroundColor Red
+        exit 1
+    }
 
-    try { Save-QbtCredentials $cred; Write-Host "Credentials saved." -ForegroundColor Green }
-    catch { Write-Host "Failed: $_" -ForegroundColor Red; exit 1 }
+    try {
+        Save-Credential -Credential $cred
+        Write-Host "Credentials saved to Windows Credential Manager." -ForegroundColor Green
+    }
+    catch {
+        Write-Host "Failed to save credentials: $_" -ForegroundColor Red
+        exit 1
+    }
 
-    $path = $PSCommandPath
+    $scriptPath = $MyInvocation.PSCommandPath
     Unregister-ScheduledTask -TaskName qbitstatic -Confirm:$false -ErrorAction SilentlyContinue
 
     try {
         Register-ScheduledTask -TaskName qbitstatic `
-            -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$path`"") `
+            -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`"") `
             -Trigger (New-ScheduledTaskTrigger -AtLogon) `
             -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)) `
             -Principal (New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited) | Out-Null
         Write-Host "Scheduled task created." -ForegroundColor Green
-    } catch { Write-Host "Task creation failed: $_" -ForegroundColor Red; exit 1 }
+    }
+    catch {
+        Write-Host "Task creation failed: $_" -ForegroundColor Red
+        exit 1
+    }
 
-    if (-not (Test-Path $LOG_DIR)) { New-Item -ItemType Directory -Path $LOG_DIR -Force | Out-Null }
-    Write-Host "`nDone! Starts at login. Run .\qbitstatic.ps1 to start now.`n" -ForegroundColor Green
+    if (-not (Test-Path $Config.LogDir)) {
+        New-Item -ItemType Directory -Path $Config.LogDir -Force | Out-Null
+    }
+
+    Write-Host "`nInstallation complete!" -ForegroundColor Green
+    Write-Host "- Starts automatically at login" -ForegroundColor Gray
+    Write-Host "- Run .\qbitstatic.ps1 to start now" -ForegroundColor Gray
+    Write-Host "- Run .\qbitstatic.ps1 -Status to check status" -ForegroundColor Gray
+    Write-Host "- Edit config.json to change settings`n" -ForegroundColor Gray
+}
+
+function Uninstall-QbitStatic {
+    Write-Host "`nqbitstatic Uninstallation`n" -ForegroundColor Cyan
+
+    # Remove scheduled task
+    $task = Get-ScheduledTask -TaskName qbitstatic -ErrorAction SilentlyContinue
+    if ($task) {
+        Unregister-ScheduledTask -TaskName qbitstatic -Confirm:$false
+        Write-Host "Scheduled task removed." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Scheduled task not found (already removed)." -ForegroundColor Yellow
+    }
+
+    # Remove credentials
+    if (Remove-StoredCredential) {
+        Write-Host "Credentials removed." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Credentials not found (already removed)." -ForegroundColor Yellow
+    }
+
+    Write-Host "`nUninstallation complete!" -ForegroundColor Green
+    Write-Host "- Logs retained at: $($Config.LogDir)" -ForegroundColor Gray
+    Write-Host "- Config retained at: $ScriptDir\config.json`n" -ForegroundColor Gray
+}
+
+function Show-Status {
+    Write-Host "`nqbitstatic Status`n" -ForegroundColor Cyan
+
+    # VPN Port
+    $vpnPort = Get-VpnPort
+    if ($vpnPort) {
+        Write-Host "VPN Port:        $vpnPort" -ForegroundColor Green
+    }
+    else {
+        Write-Host "VPN Port:        Not detected" -ForegroundColor Yellow
+    }
+
+    # Credentials
+    $cred = Get-StoredCredential
+    if ($cred) {
+        Write-Host "Credentials:     Stored (user: $($cred.UserName))" -ForegroundColor Green
+    }
+    else {
+        Write-Host "Credentials:     Not found" -ForegroundColor Red
+    }
+
+    # qBittorrent connection
+    if ($cred -and (Connect-QBittorrent -Credential $cred)) {
+        Write-Host "qBittorrent:     Connected" -ForegroundColor Green
+        $qbtPort = Get-QBittorrentPort
+        if ($qbtPort) {
+            if ($vpnPort -and $qbtPort -eq $vpnPort) {
+                Write-Host "Listening Port:  $qbtPort (synced)" -ForegroundColor Green
+            }
+            elseif ($vpnPort) {
+                Write-Host "Listening Port:  $qbtPort (needs sync to $vpnPort)" -ForegroundColor Yellow
+            }
+            else {
+                Write-Host "Listening Port:  $qbtPort" -ForegroundColor Cyan
+            }
+        }
+        Disconnect-QBittorrent
+    }
+    else {
+        Write-Host "qBittorrent:     Not connected" -ForegroundColor Red
+    }
+
+    # Scheduled task
+    $task = Get-ScheduledTask -TaskName qbitstatic -ErrorAction SilentlyContinue
+    if ($task) {
+        Write-Host "Scheduled Task:  $($task.State)" -ForegroundColor Green
+    }
+    else {
+        Write-Host "Scheduled Task:  Not installed" -ForegroundColor Yellow
+    }
+
+    # Log file
+    $logPath = Get-LogPath
+    if (Test-Path $logPath) {
+        $logSize = [math]::Round((Get-Item $logPath).Length / 1KB, 1)
+        Write-Host "Log File:        $logPath (${logSize}KB)" -ForegroundColor Gray
+    }
+    else {
+        Write-Host "Log File:        Not created yet" -ForegroundColor Gray
+    }
+
+    Write-Host ""
 }
 
 # === ENTRY POINT ===
-if ($Install) { Install-QbitStatic } else { Start-PortMonitor }
+if ($Install) {
+    Install-QbitStatic
+}
+elseif ($Uninstall) {
+    Uninstall-QbitStatic
+}
+elseif ($Status) {
+    Show-Status
+}
+else {
+    Start-PortMonitor
+}

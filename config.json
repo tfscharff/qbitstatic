@@ -1,0 +1,22 @@
+{
+  "qbittorrent": {
+    "exePath": "C:\\Program Files\\qBittorrent\\qbittorrent.exe",
+    "webUrl": "http://localhost:8080",
+    "credentialTarget": "qbitstatic-qbittorrent"
+  },
+  "protonvpn": {
+    "logPath": "%LOCALAPPDATA%\\Proton\\Proton VPN\\Logs\\client-logs.txt",
+    "portPattern": "Port pair (\\d+)->"
+  },
+  "monitoring": {
+    "pollIntervalSeconds": 30,
+    "maxRetries": 3,
+    "retryDelaySeconds": 5
+  },
+  "logging": {
+    "directory": "%LOCALAPPDATA%\\qbitstatic",
+    "fileName": "qbitstatic.log",
+    "maxSizeMB": 1,
+    "checkInterval": 100
+  }
+}

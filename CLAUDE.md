@@ -4,34 +4,94 @@ PowerShell tool that syncs ProtonVPN's port forwarding port to qBittorrent on Wi
 
 ## Architecture
 
-Single script (`qbitstatic.ps1`) with these components:
-- **Port Detector**: Reads ProtonVPN port from client logs (`%LOCALAPPDATA%\Proton\Proton VPN\Logs\client-logs.txt`), reads only last 50KB for efficiency, caches file modification time to skip unchanged reads
-- **Credential Manager**: Stores/retrieves qBittorrent credentials via Windows Credential Manager (P/Invoke to advapi32.dll with CRED_TYPE_GENERIC)
-- **qBittorrent API**: Connects to Web UI, gets/sets listening port, triggers restart with graceful shutdown
-- **Main Loop**: Polls every 30s, reuses session when valid, updates qBittorrent when VPN port changes
+### Modular Structure (v2.0)
 
-## Key Files
+```
+qbitstatic/
+├── qbitstatic.ps1           # Main entry point
+├── config.json              # Configuration file
+├── uninstall.ps1            # Legacy uninstaller
+├── modules/
+│   ├── Config.psm1          # Configuration loading
+│   ├── Logging.psm1         # Log file management
+│   ├── Credentials.psm1     # Windows Credential Manager
+│   ├── PortDetector.psm1    # ProtonVPN port detection
+│   └── QBittorrentApi.psm1  # qBittorrent Web API
+└── tests/
+    ├── Run-Tests.ps1        # Test runner
+    ├── syntax-check.ps1     # Quick syntax validation
+    ├── Config.Tests.ps1
+    ├── Logging.Tests.ps1
+    ├── PortDetector.Tests.ps1
+    └── QBittorrentApi.Tests.ps1
+```
 
-- `qbitstatic.ps1` - Main script (run with `-Install` for setup, no args for monitoring)
-- `uninstall.ps1` - Removes scheduled task and credentials
+### Module Responsibilities
 
-## Development Notes
+- **Config.psm1**: Loads `config.json`, expands environment variables, caches config
+- **Logging.psm1**: Timestamped logging with rotation (1MB default)
+- **Credentials.psm1**: P/Invoke to Windows Credential Manager (advapi32.dll)
+- **PortDetector.psm1**: Reads ProtonVPN logs, extracts port, caches results
+- **QBittorrentApi.psm1**: HTTP client with retry logic, session management
 
-- Target: PowerShell 5.1+ (Windows 10/11 built-in)
-- No external dependencies
-- Credentials stored in Windows Credential Manager (target: `qbitstatic-qbittorrent`)
-- Logs to `%LOCALAPPDATA%\qbitstatic\qbitstatic.log` (1MB rotation)
-- Runs as scheduled task triggered at logon
+### Key Features
+
+- **Configuration file**: All settings in `config.json` (no code editing)
+- **Retry logic**: Configurable retries with delay for API failures
+- **Error resilience**: Consecutive error tracking, graceful exit after threshold
+- **Status command**: `-Status` flag shows current state at a glance
+
+## Commands
+
+```powershell
+# Install (prompts for credentials, creates scheduled task)
+.\qbitstatic.ps1 -Install
+
+# Show status
+.\qbitstatic.ps1 -Status
+
+# Start monitoring (runs in foreground)
+.\qbitstatic.ps1
+
+# Uninstall
+.\qbitstatic.ps1 -Uninstall
+```
+
+## Configuration
+
+Edit `config.json` to customize:
+
+```json
+{
+  "qbittorrent": {
+    "exePath": "C:\\Program Files\\qBittorrent\\qbittorrent.exe",
+    "webUrl": "http://localhost:8080"
+  },
+  "monitoring": {
+    "pollIntervalSeconds": 30,
+    "maxRetries": 3,
+    "retryDelaySeconds": 5
+  }
+}
+```
 
 ## Testing
 
 ```powershell
-# Syntax check
-powershell -Command "[scriptblock]::Create((Get-Content .\qbitstatic.ps1 -Raw))"
+# Quick syntax check
+.\tests\syntax-check.ps1
 
-# Manual run
-.\qbitstatic.ps1
+# Full test suite (requires Pester 5+)
+.\tests\Run-Tests.ps1
 
-# Install
-.\qbitstatic.ps1 -Install
+# With coverage
+.\tests\Run-Tests.ps1 -Coverage
 ```
+
+## Development Notes
+
+- Target: PowerShell 5.1+ (Windows 10/11 built-in)
+- No external dependencies (uses Windows built-ins)
+- Credentials stored in Windows Credential Manager
+- Logs to `%LOCALAPPDATA%\qbitstatic\qbitstatic.log`
+- Runs as scheduled task triggered at logon
