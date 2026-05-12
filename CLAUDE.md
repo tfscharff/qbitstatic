@@ -8,9 +8,8 @@ PowerShell tool that syncs ProtonVPN's port forwarding port to qBittorrent on Wi
 
 ```
 qbitstatic/
-├── qbitstatic.ps1           # Main entry point
+├── qbitstatic.ps1           # Main entry point (-Install, -Status, -Uninstall)
 ├── config.json              # Configuration file
-├── uninstall.ps1            # Legacy uninstaller
 ├── modules/
 │   ├── Config.psm1          # Configuration loading
 │   ├── Logging.psm1         # Log file management
