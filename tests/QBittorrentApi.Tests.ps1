@@ -74,4 +74,32 @@ Describe "QBittorrentApi Module" {
             { Set-QBittorrentPort -Port 70000 } | Should -Throw
         }
     }
+
+    Context "Get-QBittorrentInterface" {
+        It "Returns null when no session" {
+            Disconnect-QBittorrent
+            Get-QBittorrentInterface | Should -BeNullOrEmpty
+        }
+    }
+
+    Context "Set-QBittorrentInterface" {
+        It "Returns false when no session" {
+            Disconnect-QBittorrent
+            Set-QBittorrentInterface -Guid "{00000000-0000-0000-0000-000000000000}" -Name "test" | Should -Be $false
+        }
+
+        It "Requires Guid parameter" {
+            { Set-QBittorrentInterface -Name "test" } | Should -Throw
+        }
+
+        It "Requires Name parameter" {
+            { Set-QBittorrentInterface -Guid "{00000000-0000-0000-0000-000000000000}" } | Should -Throw
+        }
+    }
+
+    Context "Get-AdapterGuidByName" {
+        It "Returns null for nonexistent adapter" {
+            Get-AdapterGuidByName -Name "definitely-not-a-real-adapter-xyz123" | Should -BeNullOrEmpty
+        }
+    }
 }

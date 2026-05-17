@@ -169,6 +169,90 @@ function Set-QBittorrentPort {
     }
 }
 
+function Get-QBittorrentInterface {
+    <#
+    .SYNOPSIS
+        Get the current network interface binding.
+    .OUTPUTS
+        Hashtable with Guid and Name keys, or $null on failure.
+        Guid may be empty string when no interface is configured.
+    #>
+    if (-not $script:QbtSession) { return $null }
+
+    try {
+        $r = Invoke-WebRequest -Uri "$script:QbtWebUrl/api/v2/app/preferences" -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 10
+        $prefs = $r.Content | ConvertFrom-Json
+        return @{
+            Guid = $prefs.current_network_interface
+            Name = $prefs.current_interface_name
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Set-QBittorrentInterface {
+    <#
+    .SYNOPSIS
+        Set the network interface binding by GUID and name.
+    .PARAMETER Guid
+        The Windows network adapter GUID (e.g. "{EAB2262D-9AB1-...}").
+    .PARAMETER Name
+        The friendly adapter name (e.g. "ProtonVPN").
+    .OUTPUTS
+        $true on success, $false on failure.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Guid,
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    if (-not $script:QbtSession) { return $false }
+
+    try {
+        Invoke-WithRetry -Operation "set qBittorrent interface" -ScriptBlock {
+            Invoke-WebRequest -Uri "$script:QbtWebUrl/api/v2/app/setPreferences" -Method POST -Body @{
+                json = (@{
+                    current_network_interface = $Guid
+                    current_interface_name = $Name
+                } | ConvertTo-Json -Compress)
+            } -WebSession $script:QbtSession -UseBasicParsing -TimeoutSec 10 | Out-Null
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-AdapterGuidByName {
+    <#
+    .SYNOPSIS
+        Look up a Windows network adapter's GUID by friendly name.
+    .PARAMETER Name
+        The adapter name to find (e.g. "ProtonVPN").
+    .OUTPUTS
+        GUID string in qBittorrent format (e.g. "{EAB2262D-...}"), or $null if not found
+        or the adapter is not Up.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    try {
+        $adapter = Get-NetAdapter -Name $Name -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' } | Select-Object -First 1
+        if (-not $adapter) { return $null }
+        return $adapter.InterfaceGuid
+    }
+    catch {
+        return $null
+    }
+}
+
 function Restart-QBittorrent {
     <#
     .SYNOPSIS
@@ -211,4 +295,4 @@ function Get-QBittorrentExePath {
     return $script:QbtExePath
 }
 
-Export-ModuleMember -Function Initialize-QBittorrentApi, Connect-QBittorrent, Disconnect-QBittorrent, Test-QBittorrentConnection, Get-QBittorrentPort, Set-QBittorrentPort, Restart-QBittorrent, Get-QBittorrentExePath, Invoke-WithRetry
+Export-ModuleMember -Function Initialize-QBittorrentApi, Connect-QBittorrent, Disconnect-QBittorrent, Test-QBittorrentConnection, Get-QBittorrentPort, Set-QBittorrentPort, Get-QBittorrentInterface, Set-QBittorrentInterface, Get-AdapterGuidByName, Restart-QBittorrent, Get-QBittorrentExePath, Invoke-WithRetry

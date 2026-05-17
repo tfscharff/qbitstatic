@@ -1,6 +1,6 @@
 # qbitstatic
 
-PowerShell tool that syncs ProtonVPN's port forwarding port to qBittorrent on Windows.
+PowerShell tool that syncs ProtonVPN's port forwarding port **and network interface GUID** to qBittorrent on Windows. The interface sync prevents the "configured network interface is invalid" error that occurs when ProtonVPN's WireGuard adapter is reassigned a GUID on reconnect, which otherwise causes qBittorrent to listen on no port until manually reconfigured.
 
 ## Architecture
 

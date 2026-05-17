@@ -36,6 +36,44 @@ Initialize-QBittorrentApi -WebUrl $Config.QbtWebUrl -ExePath $Config.QbtExePath 
 
 # === MAIN FUNCTIONS ===
 
+function Ensure-QBittorrentSession {
+    param([Parameter(Mandatory)][PSCredential]$Credential)
+
+    if (Test-QBittorrentConnection) { return $true }
+    Write-Log "Connecting to qBittorrent..."
+    return Connect-QBittorrent -Credential $Credential
+}
+
+function Sync-QBittorrentInterface {
+    <#
+    .SYNOPSIS
+        Reconcile qBittorrent's bound interface GUID with the current Windows adapter GUID
+        for the same friendly name. Returns $true if a restart was performed.
+    #>
+    $iface = Get-QBittorrentInterface
+    if (-not $iface -or -not $iface.Name) { return $false }
+
+    $currentGuid = Get-AdapterGuidByName -Name $iface.Name
+    if (-not $currentGuid) {
+        # Adapter not present (e.g., VPN disconnected). Skip silently.
+        return $false
+    }
+
+    if ($iface.Guid -eq $currentGuid) { return $false }
+
+    Write-Log "Interface GUID drift for '$($iface.Name)': qBittorrent=$($iface.Guid), Windows=$currentGuid. Updating..."
+    if (Set-QBittorrentInterface -Guid $currentGuid -Name $iface.Name) {
+        Write-Log "Interface GUID updated. Restarting qBittorrent..."
+        Restart-QBittorrent
+        Disconnect-QBittorrent
+        Start-Sleep -Seconds 5
+        return $true
+    }
+
+    Write-Log "Failed to update interface GUID" -Level ERROR
+    return $false
+}
+
 function Start-PortMonitor {
     Write-Log "qbitstatic v2.0 starting..."
 
@@ -51,23 +89,28 @@ function Start-PortMonitor {
 
     while ($true) {
         try {
+            # Interface drift check (runs every poll; restart-and-continue if drift fixed)
+            if (Ensure-QBittorrentSession -Credential $cred) {
+                if (Sync-QBittorrentInterface) {
+                    $consecutiveErrors = 0
+                    Start-Sleep -Seconds $Config.PollInterval
+                    continue
+                }
+            }
+
             $vpnPort = Get-VpnPort
             if ($vpnPort -and $vpnPort -ne $lastPort) {
                 Write-Log "VPN port detected: $vpnPort"
 
-                # Reconnect if session invalid
-                if (-not (Test-QBittorrentConnection)) {
-                    Write-Log "Connecting to qBittorrent..."
-                    if (-not (Connect-QBittorrent -Credential $cred)) {
-                        Write-Log "Failed to connect to qBittorrent" -Level ERROR
-                        $consecutiveErrors++
-                        if ($consecutiveErrors -ge $maxConsecutiveErrors) {
-                            Write-Log "Too many consecutive errors, exiting" -Level ERROR
-                            exit 1
-                        }
-                        Start-Sleep -Seconds $Config.PollInterval
-                        continue
+                if (-not (Ensure-QBittorrentSession -Credential $cred)) {
+                    Write-Log "Failed to connect to qBittorrent" -Level ERROR
+                    $consecutiveErrors++
+                    if ($consecutiveErrors -ge $maxConsecutiveErrors) {
+                        Write-Log "Too many consecutive errors, exiting" -Level ERROR
+                        exit 1
                     }
+                    Start-Sleep -Seconds $Config.PollInterval
+                    continue
                 }
 
                 $qbtPort = Get-QBittorrentPort
@@ -214,6 +257,24 @@ function Show-Status {
                 Write-Host "Listening Port:  $qbtPort" -ForegroundColor Cyan
             }
         }
+
+        $iface = Get-QBittorrentInterface
+        if ($iface -and $iface.Name) {
+            $currentGuid = Get-AdapterGuidByName -Name $iface.Name
+            if (-not $currentGuid) {
+                Write-Host "Interface:       $($iface.Name) (adapter not Up)" -ForegroundColor Yellow
+            }
+            elseif ($iface.Guid -eq $currentGuid) {
+                Write-Host "Interface:       $($iface.Name) (synced)" -ForegroundColor Green
+            }
+            else {
+                Write-Host "Interface:       $($iface.Name) (GUID drift: qBt=$($iface.Guid) Win=$currentGuid)" -ForegroundColor Yellow
+            }
+        }
+        else {
+            Write-Host "Interface:       not bound" -ForegroundColor Gray
+        }
+
         Disconnect-QBittorrent
     }
     else {

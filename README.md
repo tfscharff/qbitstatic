@@ -1,6 +1,6 @@
 # qbitstatic
 
-Automatically sync ProtonVPN's port forwarding port to qBittorrent on Windows.
+Automatically sync ProtonVPN's port forwarding port **and network interface GUID** to qBittorrent on Windows. The interface sync fixes the "configured network interface is invalid" error that occurs when ProtonVPN's WireGuard adapter is reassigned a new GUID on reconnect.
 
 ## Requirements
 
@@ -84,7 +84,8 @@ qbitstatic/
 1. Reads ProtonVPN's forwarded port from client logs
 2. Compares with qBittorrent's current listening port
 3. If different, updates qBittorrent via Web API and restarts it
-4. Polls every 30 seconds (configurable)
+4. Each poll, also compares qBittorrent's bound interface GUID with the current Windows GUID for the same adapter name; if drifted, updates and restarts
+5. Polls every 30 seconds (configurable)
 
 ## Testing
 
