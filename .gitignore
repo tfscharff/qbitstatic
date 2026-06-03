@@ -13,3 +13,6 @@
 # Windows
 Thumbs.db
 Desktop.ini
+
+# Worktrees
+.worktrees
