@@ -5,7 +5,7 @@ Automatically sync ProtonVPN's port forwarding port **and network interface GUID
 ## Requirements
 
 - Windows 10/11
-- ProtonVPN with port forwarding enabled
+- ProtonVPN (Proton VPN Windows client; verified against **v4.4.1**) with port forwarding enabled
 - qBittorrent with Web UI enabled
 
 ## Setup
@@ -86,6 +86,19 @@ qbitstatic/
 3. If different, updates qBittorrent via Web API and restarts it
 4. Each poll, also compares qBittorrent's bound interface GUID with the current Windows GUID for the same adapter name; if drifted, updates and restarts
 5. Polls every 30 seconds (configurable)
+
+The Proton VPN client logs the forwarded port as `Port pair <internal>-><external>` in `client-logs.txt`. This format is unchanged through v4.4.1, so no configuration change is needed after a Proton VPN update.
+
+## Troubleshooting
+
+**`-Status` shows "VPN Port: Not detected"**
+
+This means ProtonVPN is not currently forwarding a port, so there is nothing for qbitstatic to read. The client only writes a `Port pair` line while port forwarding is active; when forwarding fails it logs `PortForwarding Status 'Error'` instead. To fix:
+
+- Ensure **Port forwarding** is enabled in Proton VPN settings
+- Connect to a **P2P server that supports port forwarding** (reconnect if the current session shows a port-forwarding error)
+
+Once Proton VPN is actively forwarding a port, qbitstatic detects it on the next poll and syncs qBittorrent automatically. The network-interface GUID sync runs independently and works whenever the `ProtonVPN` adapter is up.
 
 ## Testing
 

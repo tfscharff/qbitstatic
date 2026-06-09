@@ -90,12 +90,12 @@ Port pair 55555->
 
             Start-Sleep -Milliseconds 100
             @"
-Port pair 66666->
+Port pair 60001->
 "@ | Set-Content $TestLogFile
             $port2 = Get-VpnPort
 
             $port1 | Should -Be 55555
-            $port2 | Should -Be 66666
+            $port2 | Should -Be 60001
         }
     }
 
@@ -105,11 +105,11 @@ Port pair 66666->
             Reset-PortCache
 
             @"
-Port pair 77777->
+Port pair 51234->
 "@ | Set-Content $TestLogFile
             Get-VpnPort | Out-Null
 
-            Get-CachedPort | Should -Be 77777
+            Get-CachedPort | Should -Be 51234
         }
     }
 
@@ -117,9 +117,10 @@ Port pair 77777->
         It "Clears cached port" {
             Initialize-PortDetector -LogPath $TestLogFile
             @"
-Port pair 88888->
+Port pair 52222->
 "@ | Set-Content $TestLogFile
             Get-VpnPort | Out-Null
+            Get-CachedPort | Should -Be 52222
 
             Reset-PortCache
             Get-CachedPort | Should -BeNullOrEmpty
