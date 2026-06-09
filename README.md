@@ -100,6 +100,18 @@ This means ProtonVPN is not currently forwarding a port, so there is nothing for
 
 Once Proton VPN is actively forwarding a port, qbitstatic detects it on the next poll and syncs qBittorrent automatically. The network-interface GUID sync runs independently and works whenever the `ProtonVPN` adapter is up.
 
+**`-Status` detects the VPN port but qBittorrent never syncs**
+
+Syncing happens only in the background monitor, not in `-Status` (which just reports). Check that the monitor is actually running:
+
+```powershell
+.\qbitstatic.ps1 -Status   # "Scheduled Task: Running" means the monitor is active
+```
+
+If it shows `Ready` (idle), start it with `Start-ScheduledTask -TaskName qbitstatic`. The task is triggered at logon, so it also starts automatically the next time you sign in.
+
+> **Note:** Tasks created before this fix had a default 72-hour execution limit, after which Windows silently stopped the monitor until the next logon. Re-run `.\qbitstatic.ps1 -Install` to recreate the task with no time limit (the install now passes `-ExecutionTimeLimit 0`).
+
 ## Testing
 
 ```powershell
