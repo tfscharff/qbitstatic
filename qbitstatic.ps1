@@ -171,11 +171,23 @@ function Install-QbitStatic {
     $scriptPath = $MyInvocation.PSCommandPath
     Unregister-ScheduledTask -TaskName qbitstatic -Confirm:$false -ErrorAction SilentlyContinue
 
+    # Two triggers:
+    #  - AtLogon: start the monitor at sign-in.
+    #  - Watchdog (Once + 15-min repetition, effectively indefinite): if the monitor
+    #    process ever dies (e.g. terminated at shutdown/sleep) without a fresh logon,
+    #    this re-launches it. Combined with -MultipleInstances IgnoreNew below, the
+    #    watchdog is a no-op while the monitor is already running, so it never spawns
+    #    duplicates. This fixes the case where AtLogon does not fire on resume-from-sleep.
+    $logonTrigger = New-ScheduledTaskTrigger -AtLogon
+    $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        -RepetitionInterval (New-TimeSpan -Minutes 15) `
+        -RepetitionDuration (New-TimeSpan -Days 3650)
+
     try {
         Register-ScheduledTask -TaskName qbitstatic `
             -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`"") `
-            -Trigger (New-ScheduledTaskTrigger -AtLogon) `
-            -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0)) `
+            -Trigger @($logonTrigger, $watchdogTrigger) `
+            -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew) `
             -Principal (New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited) | Out-Null
         Write-Host "Scheduled task created." -ForegroundColor Green
     }
