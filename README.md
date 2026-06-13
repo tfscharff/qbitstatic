@@ -81,11 +81,12 @@ qbitstatic/
 
 ## How It Works
 
-1. Reads ProtonVPN's forwarded port from client logs
-2. Compares with qBittorrent's current listening port
+1. Reads ProtonVPN's forwarded port from client logs — checks the configured log file plus any rotated siblings (e.g. `client-logs.1.txt`), newest-first, so log rotation or a momentarily stale file doesn't block detection
+2. Compares with qBittorrent's actual listening port **on every poll**, not just when the detected VPN port changes — this self-corrects if a transition was missed (e.g. during a Proton VPN update)
 3. If different, updates qBittorrent via Web API and restarts it
 4. Each poll, also compares qBittorrent's bound interface GUID with the current Windows GUID for the same adapter name; if drifted, updates and restarts
 5. Polls every 30 seconds (configurable)
+6. Logs a heartbeat every 10 minutes while everything is in sync, and a throttled warning if no port can be detected (log file missing, or the log format no longer matches the expected pattern)
 
 The Proton VPN client logs the forwarded port as `Port pair <internal>-><external>` in `client-logs.txt`. This format has been stable across client updates, so no configuration change is needed after a Proton VPN update.
 
@@ -124,6 +125,16 @@ If it shows `Ready` (idle), start it with `Start-ScheduledTask -TaskName qbitsta
 > - Only an `AtLogon` trigger, which does not fire on resume-from-sleep, so a process killed at shutdown/sleep stayed dead until the next sign-in. Fixed: the install now adds a 15-minute watchdog trigger with an `IgnoreNew` instances policy (see *Scheduled task resilience* above).
 >
 > Re-run `.\qbitstatic.ps1 -Install` to recreate the task with both fixes applied.
+
+**Port doesn't update in qBittorrent after a Proton VPN update**
+
+A running monitor can miss the port change that happens during/around a Proton VPN client update (the update can briefly disconnect/rotate the log file). To make this self-healing:
+
+- Detection now falls back to rotated log siblings (`client-logs.1.txt`, etc.) if the primary log has no current port line or is missing.
+- The monitor now reconciles the VPN port against qBittorrent's actual port **every poll**, regardless of whether the in-memory port value changed — so a missed update is corrected on the next poll instead of staying stuck.
+- If detection still fails (e.g. Proton changed the log format), a throttled `WARN` line is written to `qbitstatic.log` every 10 minutes explaining why (file not found vs. no matching pattern vs. out-of-range value), so the cause is visible instead of qBittorrent silently sitting on a stale port.
+
+If you still see a stale port after a Proton VPN update, check `%LOCALAPPDATA%\qbitstatic\qbitstatic.log` for `WARN`/`ERROR` lines around the time of the update.
 
 ## Testing
 

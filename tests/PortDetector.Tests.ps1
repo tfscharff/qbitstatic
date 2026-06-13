@@ -126,4 +126,47 @@ Port pair 52222->
             Get-CachedPort | Should -BeNullOrEmpty
         }
     }
+
+    Context "Robust log resolution" {
+        BeforeEach {
+            $script:RobustDir = Join-Path $env:TEMP "qbitstatic-robust-$(Get-Random)"
+            New-Item -ItemType Directory -Path $script:RobustDir -Force | Out-Null
+            $script:RobustLog = Join-Path $script:RobustDir "client-logs.txt"
+            Initialize-PortDetector -LogPath $script:RobustLog
+        }
+
+        AfterEach {
+            Remove-Item $script:RobustDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        It "Falls back to a rotated sibling when the primary has no port line" {
+            "no port lines here, just noise" | Set-Content $script:RobustLog
+            "Port pair 50001->50001" | Set-Content (Join-Path $script:RobustDir "client-logs.1.txt")
+
+            Get-VpnPort | Should -Be 50001
+        }
+
+        It "Finds the newest sibling when the configured file is missing" {
+            # Configured client-logs.txt does not exist; only a rotated file is present.
+            "Port pair 50002->50002" | Set-Content (Join-Path $script:RobustDir "client-logs.1.txt")
+
+            Get-VpnPort | Should -Be 50002
+        }
+
+        It "Reports HadPortLine=false when the log has data but no match (format change)" {
+            "2026-01-01 Some new format with forwarded=50003 that the pattern misses" | Set-Content $script:RobustLog
+
+            Get-VpnPort | Should -BeNullOrEmpty
+            $info = Get-DetectionInfo
+            $info.Exists | Should -BeTrue
+            $info.HadPortLine | Should -BeFalse
+        }
+
+        It "Reports Exists=false when no log file is found anywhere" {
+            Remove-Item $script:RobustLog -Force -ErrorAction SilentlyContinue
+
+            Get-VpnPort | Should -BeNullOrEmpty
+            (Get-DetectionInfo).Exists | Should -BeFalse
+        }
+    }
 }

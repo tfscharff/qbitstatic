@@ -86,6 +86,8 @@ function Start-PortMonitor {
     $lastPort = $null
     $consecutiveErrors = 0
     $maxConsecutiveErrors = 10
+    $lastHeartbeat = [DateTime]::MinValue
+    $heartbeatInterval = [TimeSpan]::FromMinutes(10)
 
     while ($true) {
         try {
@@ -99,20 +101,36 @@ function Start-PortMonitor {
             }
 
             $vpnPort = Get-VpnPort
-            if ($vpnPort -and $vpnPort -ne $lastPort) {
-                Write-Log "VPN port detected: $vpnPort"
+            $heartbeatDue = (((Get-Date) - $lastHeartbeat) -ge $heartbeatInterval)
 
-                if (-not (Ensure-QBittorrentSession -Credential $cred)) {
-                    Write-Log "Failed to connect to qBittorrent" -Level ERROR
-                    $consecutiveErrors++
-                    if ($consecutiveErrors -ge $maxConsecutiveErrors) {
-                        Write-Log "Too many consecutive errors, exiting" -Level ERROR
-                        exit 1
+            if (-not $vpnPort) {
+                # No port detected. Proton may not be forwarding yet, or an update changed
+                # the log format/location. Log loudly (throttled) so the cause is visible
+                # instead of qBittorrent silently sitting on a stale port.
+                if ($heartbeatDue) {
+                    $d = Get-DetectionInfo
+                    if ($null -eq $d -or -not $d.Exists) {
+                        Write-Log "No VPN port: log file not found (expected '$($Config.VpnLogPath)'). Proton may have moved its logs." -Level WARN
                     }
-                    Start-Sleep -Seconds $Config.PollInterval
-                    continue
+                    elseif (-not $d.HadPortLine) {
+                        $kb = [math]::Round($d.SizeBytes / 1KB, 1)
+                        Write-Log "No VPN port: log '$($d.LogPath)' (${kb}KB, modified $($d.LastWrite)) has no match for pattern '$($Config.PortPattern)'. Proton log format may have changed." -Level WARN
+                    }
+                    else {
+                        Write-Log "No VPN port: a port line matched in '$($d.LogPath)' but the value was out of range." -Level WARN
+                    }
+                    $lastHeartbeat = Get-Date
+                }
+            }
+            elseif (Ensure-QBittorrentSession -Credential $cred) {
+                if ($vpnPort -ne $lastPort) {
+                    Write-Log "VPN port detected: $vpnPort"
+                    $lastPort = $vpnPort
                 }
 
+                # State-based reconcile: always compare the detected port to qBittorrent's
+                # actual port, so a missed transition self-corrects on a later poll rather
+                # than relying on an in-memory edge that an app update could cause us to miss.
                 $qbtPort = Get-QBittorrentPort
                 if ($qbtPort -and $vpnPort -ne $qbtPort) {
                     Write-Log "Port mismatch: VPN=$vpnPort, qBittorrent=$qbtPort. Updating..."
@@ -127,9 +145,20 @@ function Start-PortMonitor {
                         Write-Log "Failed to update port" -Level ERROR
                     }
                 }
+                elseif ($heartbeatDue) {
+                    Write-Log "Heartbeat: VPN port=$vpnPort, qBittorrent port=$qbtPort (in sync)"
+                    $lastHeartbeat = Get-Date
+                }
 
-                $lastPort = $vpnPort
                 $consecutiveErrors = 0
+            }
+            else {
+                Write-Log "Failed to connect to qBittorrent" -Level ERROR
+                $consecutiveErrors++
+                if ($consecutiveErrors -ge $maxConsecutiveErrors) {
+                    Write-Log "Too many consecutive errors, exiting" -Level ERROR
+                    exit 1
+                }
             }
         }
         catch {
