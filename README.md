@@ -92,7 +92,9 @@ The Proton VPN client logs the forwarded port as `Port pair <internal>-><externa
 
 ### Scheduled task resilience
 
-The scheduled task runs the monitor with a single **AtLogon** trigger — it starts when you sign in and keeps running in the background. `-ExecutionTimeLimit 0` removes the default 72-hour kill, and `-RestartCount 3 -RestartInterval 1min` restarts the task if the script itself exits (e.g. after too many consecutive API errors).
+The scheduled task runs the monitor with a single **AtLogon** trigger, delayed by 1 minute — it starts shortly after you sign in and keeps running in the background. `-ExecutionTimeLimit 0` removes the default 72-hour kill, and `-RestartCount 3 -RestartInterval 1min` restarts the task if the script itself exits (e.g. after too many consecutive API errors).
+
+The 1-minute delay exists because, on a cold boot (e.g. after a power outage), a task started at the instant of logon can be killed within seconds by Windows with exit code `0xC000013A` (`STATUS_CONTROL_C_EXIT`) while the session/shell is still being set up — and the automatic restarts land in that same unstable window and fail the same way, leaving the task idle (`Ready`) with nothing running until the next sign-in. Delaying the start avoids that window.
 
 An earlier version also added a 15-minute repeating "watchdog" trigger to re-launch the monitor in case `AtLogon` doesn't fire on resume-from-sleep. That trigger was removed: the monitor process is only *suspended* during sleep, not killed, so it wasn't fixing a real problem — and it flashed a console window every 15 minutes. The actual "port doesn't update" issue is a detection bug (see below), not a dead monitor.
 
@@ -118,6 +120,16 @@ Syncing happens only in the background monitor, not in `-Status` (which just rep
 If it shows `Ready` (idle), start it with `Start-ScheduledTask -TaskName qbitstatic`, or just sign out and back in.
 
 > **Note:** A default 72-hour execution limit used to cause Windows to kill the task after 3 days, silently stopping the monitor. Fixed: the install passes `-ExecutionTimeLimit 0` so the task runs indefinitely. Re-run `.\qbitstatic.ps1 -Install` to pick up this setting if your task predates it.
+
+**Port doesn't update after a reboot/power outage, and `-Status` shows `Scheduled Task: Ready`**
+
+`Ready` means the monitor isn't running at all — the AtLogon-triggered run died right after this boot (check `qbitstatic.log` for a `qbitstatic v2.0 starting...` line with nothing after it, and `(Get-ScheduledTask qbitstatic | Get-ScheduledTaskInfo).LastTaskResult` for `3221225786` / `0xC000013A`). This is the cold-boot timing issue described above. To recover immediately:
+
+```powershell
+Start-ScheduledTask -TaskName qbitstatic
+```
+
+Re-run `.\qbitstatic.ps1 -Install` (elevated) to pick up the 1-minute startup delay if your task predates it — this prevents the issue on future reboots.
 
 **Port doesn't update in qBittorrent after a Proton VPN update**
 

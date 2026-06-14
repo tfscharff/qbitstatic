@@ -211,7 +211,14 @@ function Install-QbitStatic {
     # doesn't actually happen (the process survives sleep/resume; it's only suspended).
     # -RestartCount/-RestartInterval below already cover the real failure case (the
     # script exiting after too many consecutive errors).
+    #
+    # Delay of 1 minute: on a cold boot, a task started immediately at logon can be
+    # killed by Windows within seconds with exit code 0xC000013A (STATUS_CONTROL_C_EXIT)
+    # while the user session/shell is still being torn down and rebuilt - even the
+    # automatic restarts land in that same unstable window and fail the same way.
+    # Delaying the start lets the session settle first.
     $logonTrigger = New-ScheduledTaskTrigger -AtLogon
+    $logonTrigger.Delay = "PT1M"
 
     try {
         Register-ScheduledTask -TaskName qbitstatic `
