@@ -182,11 +182,16 @@ function Install-QbitStatic {
         Write-Host "Update config.json with correct path if needed.`n" -ForegroundColor Yellow
     }
 
-    $cred = Get-Credential -Message "qBittorrent Web UI Login"
-    if (-not $cred) {
+    # Avoid Get-Credential: it lives in Microsoft.PowerShell.Security, which fails to
+    # autoload under PowerShell 5.1 on this machine (see Credentials.psm1 for details).
+    Write-Host "qBittorrent Web UI Login" -ForegroundColor Cyan
+    $username = Read-Host "Username"
+    if (-not $username) {
         Write-Host "Cancelled." -ForegroundColor Red
         exit 1
     }
+    $securePassword = Read-Host "Password" -AsSecureString
+    $cred = [PSCredential]::new($username, $securePassword)
 
     try {
         Save-Credential -Credential $cred

@@ -102,7 +102,13 @@ function Get-StoredCredential {
         if ($c.CredentialBlobSize -eq 0) { return $null }
 
         $pw = [Runtime.InteropServices.Marshal]::PtrToStringUni($c.CredentialBlob, $c.CredentialBlobSize / 2)
-        return [PSCredential]::new($c.UserName, (ConvertTo-SecureString $pw -AsPlainText -Force))
+        # Avoid ConvertTo-SecureString: on this machine PowerShell 5.1's module
+        # autoloader resolves Microsoft.PowerShell.Security to the PS7 copy first
+        # (PSModulePath ordering), which fails to import due to conflicting type data.
+        $securePw = New-Object System.Security.SecureString
+        foreach ($ch in $pw.ToCharArray()) { $securePw.AppendChar($ch) }
+        $securePw.MakeReadOnly()
+        return [PSCredential]::new($c.UserName, $securePw)
     }
     finally {
         [CredManager.Api]::CredFree($ptr)
