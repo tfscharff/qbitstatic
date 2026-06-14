@@ -194,7 +194,7 @@ function Install-QbitStatic {
     $cred = [PSCredential]::new($username, $securePassword)
 
     try {
-        Save-Credential -Credential $cred
+        Save-Credential -Credential $cred | Out-Null
         Write-Host "Credentials saved to Windows Credential Manager." -ForegroundColor Green
     }
     catch {
