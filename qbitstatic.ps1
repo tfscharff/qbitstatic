@@ -77,6 +77,15 @@ function Sync-QBittorrentInterface {
 function Start-PortMonitor {
     Write-Log "qbitstatic v2.0 starting..."
 
+    # Diagnostic: the process has been observed to die unexpectedly (Task Scheduler
+    # LastTaskResult 0xC000013A / STATUS_CONTROL_C_EXIT - the exit code Windows uses
+    # when a console process is force-terminated, e.g. on logoff/shutdown/console-close
+    # or Ctrl+C) without any error being logged. Log if the engine sees this happen,
+    # so a future occurrence shows the reason instead of the log just stopping.
+    Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
+        Write-Log "Process exiting via PowerShell.Exiting event (console close/logoff/shutdown/Ctrl+C)" -Level WARN
+    } | Out-Null
+
     $cred = Get-StoredCredential
     if (-not $cred) {
         Write-Log "No credentials found. Run with -Install" -Level ERROR
@@ -209,8 +218,15 @@ function Install-QbitStatic {
     # "watchdog" re-launch trigger was tried previously but removed: it fired every
     # 15 minutes (flashing a console window each time) to guard against a death that
     # doesn't actually happen (the process survives sleep/resume; it's only suspended).
-    # -RestartCount/-RestartInterval below already cover the real failure case (the
-    # script exiting after too many consecutive errors).
+    #
+    # -RestartCount 999/-RestartInterval below cover BOTH the script exiting after too
+    # many consecutive errors AND a separate, unexplained failure mode observed in
+    # practice: the process is sometimes force-terminated by Windows mid-run with exit
+    # code 0xC000013A (STATUS_CONTROL_C_EXIT - the code used for console-close/logoff/
+    # shutdown/Ctrl+C terminations), with nothing logged. 999 restarts at 1-minute
+    # intervals keeps the monitor "always on" in practice even if this recurs every
+    # few minutes; the PowerShell.Exiting handler in Start-PortMonitor logs the cause
+    # if the engine sees the signal, to help root-cause this if it keeps happening.
     #
     # Delay of 1 minute: on a cold boot, a task started immediately at logon can be
     # killed by Windows within seconds with exit code 0xC000013A (STATUS_CONTROL_C_EXIT)
@@ -224,7 +240,7 @@ function Install-QbitStatic {
         Register-ScheduledTask -TaskName qbitstatic `
             -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`"") `
             -Trigger $logonTrigger `
-            -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew) `
+            -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew) `
             -Principal (New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited) | Out-Null
         Write-Host "Scheduled task created." -ForegroundColor Green
     }
