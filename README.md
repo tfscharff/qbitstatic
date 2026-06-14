@@ -92,11 +92,18 @@ The Proton VPN client logs the forwarded port as `Port pair <internal>-><externa
 
 ### Scheduled task resilience
 
-The scheduled task runs the monitor with a single **AtLogon** trigger, delayed by 1 minute — it starts shortly after you sign in and keeps running in the background. `-ExecutionTimeLimit 0` removes the default 72-hour kill, and `-RestartCount 999 -RestartInterval 1min` restarts the task if the process exits, for any reason, almost indefinitely.
+The scheduled task keeps the monitor **always on** using two triggers, and is launched through a windowless VBScript shim:
 
-The 1-minute delay exists because, on a cold boot (e.g. after a power outage), a task started at the instant of logon can be killed within seconds by Windows with exit code `0xC000013A` (`STATUS_CONTROL_C_EXIT`) while the session/shell is still being set up. Delaying the start avoids that specific window.
+- **AtLogon (delayed 1 min)** — starts the monitor after you sign in. The 1-minute delay avoids a cold-boot race (e.g. after a power outage) where a task started at the instant of logon is killed within seconds (exit `0xC000013A` / `STATUS_CONTROL_C_EXIT`) while the session/shell is still being set up.
+- **Watchdog (Once + 2-minute repetition, effectively indefinite)** — re-launches the monitor within ~2 minutes whenever it isn't running. `-MultipleInstances IgnoreNew` makes it a no-op while the monitor is already up, so it never spawns duplicates.
 
-However, the same `0xC000013A` exit code has also been observed **mid-session**, minutes after a normal start, with nothing logged beforehand — the cause isn't fully root-caused yet (it doesn't appear to be Windows Update, Defender, or another scheduled task on this machine). Because each occurrence counts against `-RestartCount`, the original value of 3 was getting exhausted within minutes, leaving the task `Ready` (idle) for the rest of the session. `-RestartCount 999` makes the task recover within ~1 minute every time this happens, so the monitor stays effectively "always on" regardless of cause. A `PowerShell.Exiting` engine-event handler logs a `WARN` line if the engine itself sees the termination signal, to help root-cause this further if it recurs.
+`-ExecutionTimeLimit 0` removes the default 72-hour kill. `-RestartCount 999 -RestartInterval 1min` is kept as a harmless backup layer, but is **not** the mechanism relied on — see below.
+
+**Why a watchdog instead of just restart-on-failure:** The monitor process is sometimes force-terminated mid-session with exit code `0xC000013A` (the code Windows uses for console-close/logoff/shutdown/Ctrl+C terminations), with nothing logged beforehand — the underlying cause isn't fully root-caused yet. Crucially, Task Scheduler's `RestartOnFailure` does **not** reliably restart the task after this kind of termination (observed in practice: with `RestartCount 999`, zero restarts fired over many minutes). The repetition-trigger watchdog does not depend on `RestartOnFailure` at all — it simply re-runs the task on a fixed interval and relies on `IgnoreNew` for de-duplication, which is reliable.
+
+**Why the VBScript shim (`run-hidden.vbs`):** Launching `powershell.exe -WindowStyle Hidden` directly from Task Scheduler briefly flashes a `conhost` console window *every time the watchdog trigger fires* — even with `IgnoreNew` set (confirmed: an earlier watchdog flashed every 15 minutes despite `IgnoreNew`). `wscript.exe` has no console of its own and starts PowerShell with window style 0, so the watchdog never flashes. The shim uses `bWaitOnReturn = True` so it stays alive for the monitor's lifetime, which is what lets `IgnoreNew` correctly see the task as "running."
+
+A `PowerShell.Exiting` engine-event handler logs a `WARN` line if the engine ever sees a clean termination signal, to help root-cause the `0xC000013A` kills further if they recur.
 
 An earlier version also added a 15-minute repeating "watchdog" trigger to re-launch the monitor in case `AtLogon` doesn't fire on resume-from-sleep. That trigger was removed: the monitor process is only *suspended* during sleep, not killed, so it wasn't fixing a real problem — and it flashed a console window every 15 minutes. The actual "port doesn't update" issue is a detection bug (see below), not a dead monitor.
 

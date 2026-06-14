@@ -211,35 +211,46 @@ function Install-QbitStatic {
         exit 1
     }
 
-    $scriptPath = $MyInvocation.PSCommandPath
+    $vbsPath = Join-Path $ScriptDir "run-hidden.vbs"
+    if (-not (Test-Path $vbsPath)) {
+        Write-Host "ERROR: launcher not found at $vbsPath" -ForegroundColor Red
+        exit 1
+    }
     Unregister-ScheduledTask -TaskName qbitstatic -Confirm:$false -ErrorAction SilentlyContinue
 
-    # AtLogon: start the monitor at sign-in. This is the only trigger - a periodic
-    # "watchdog" re-launch trigger was tried previously but removed: it fired every
-    # 15 minutes (flashing a console window each time) to guard against a death that
-    # doesn't actually happen (the process survives sleep/resume; it's only suspended).
+    # Two triggers keep the monitor "always on":
     #
-    # -RestartCount 999/-RestartInterval below cover BOTH the script exiting after too
-    # many consecutive errors AND a separate, unexplained failure mode observed in
-    # practice: the process is sometimes force-terminated by Windows mid-run with exit
-    # code 0xC000013A (STATUS_CONTROL_C_EXIT - the code used for console-close/logoff/
-    # shutdown/Ctrl+C terminations), with nothing logged. 999 restarts at 1-minute
-    # intervals keeps the monitor "always on" in practice even if this recurs every
-    # few minutes; the PowerShell.Exiting handler in Start-PortMonitor logs the cause
-    # if the engine sees the signal, to help root-cause this if it keeps happening.
+    #  - AtLogon (delayed 1 min): starts the monitor after you sign in. The 1-minute
+    #    delay avoids a cold-boot race where a task started at the instant of logon is
+    #    killed within seconds (exit 0xC000013A) while the session/shell is still being
+    #    set up.
     #
-    # Delay of 1 minute: on a cold boot, a task started immediately at logon can be
-    # killed by Windows within seconds with exit code 0xC000013A (STATUS_CONTROL_C_EXIT)
-    # while the user session/shell is still being torn down and rebuilt - even the
-    # automatic restarts land in that same unstable window and fail the same way.
-    # Delaying the start lets the session settle first.
+    #  - Watchdog (Once + 2-minute repetition, effectively indefinite): the monitor
+    #    process has been observed to be force-terminated mid-session (exit 0xC000013A /
+    #    STATUS_CONTROL_C_EXIT) with nothing logged, and Task Scheduler's RestartOnFailure
+    #    does NOT reliably restart it afterward. This trigger re-launches the monitor
+    #    within ~2 minutes whenever it isn't running. MultipleInstances=IgnoreNew makes
+    #    it a no-op while the monitor is already up.
+    #
+    # The action runs wscript.exe on run-hidden.vbs rather than powershell.exe directly:
+    # launching "powershell.exe -WindowStyle Hidden" from Task Scheduler flashes a conhost
+    # window every time the watchdog fires (even with IgnoreNew - confirmed in practice).
+    # wscript.exe has no console of its own and starts PowerShell with window style 0, so
+    # the watchdog never flashes. See run-hidden.vbs.
+    #
+    # RestartCount/-RestartInterval below are kept as a harmless backup layer; the
+    # watchdog trigger is the mechanism actually relied on. The PowerShell.Exiting handler
+    # in Start-PortMonitor logs the cause if the engine ever sees a clean exit signal.
     $logonTrigger = New-ScheduledTaskTrigger -AtLogon
     $logonTrigger.Delay = "PT1M"
+    $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        -RepetitionInterval (New-TimeSpan -Minutes 2) `
+        -RepetitionDuration (New-TimeSpan -Days 3650)
 
     try {
         Register-ScheduledTask -TaskName qbitstatic `
-            -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`"") `
-            -Trigger $logonTrigger `
+            -Action (New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbsPath`"") `
+            -Trigger @($logonTrigger, $watchdogTrigger) `
             -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -MultipleInstances IgnoreNew) `
             -Principal (New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited) | Out-Null
         Write-Host "Scheduled task created." -ForegroundColor Green
