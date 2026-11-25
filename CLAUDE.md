@@ -94,3 +94,22 @@ Edit `config.json` to customize:
 - Credentials stored in Windows Credential Manager
 - Logs to `%LOCALAPPDATA%\qbitstatic\qbitstatic.log`
 - Runs as scheduled task triggered at logon
+
+## Releasing
+
+A release is a version bump and a tag. There is no package: the tool runs from this folder.
+Release after a change to the scripts, modules or `config.json`. A change to docs or tests alone
+needs no release.
+
+1. Run the checks in "Testing"; do not release if any fails.
+2. Pick the new version by Semantic Versioning 2.0.0: a fix is a patch, a new feature or option
+   is a minor, and a change that breaks an existing `config.json` or command is a major.
+3. Set `$Script:QbitstaticVersion` in `qbitstatic.ps1` to it. That line is the only place the version is written.
+4. Commit that one file as `chore(release): vX.Y.Z`.
+5. Tag the commit with an annotated tag: `git tag -a vX.Y.Z -m "qbitstatic X.Y.Z"`.
+6. Push the commit and the tag together: `git push --follow-tags`.
+7. Check `.\qbitstatic.ps1 -Version` prints the new version.
+
+The scheduled task keeps running the code it loaded at start. After a release, the new code
+takes effect when the monitor next restarts (sign-in, or ending and starting the `qbitstatic`
+task); say so to the user and leave the restart to them.
