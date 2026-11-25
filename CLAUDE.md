@@ -21,6 +21,7 @@ qbitstatic/
     ├── syntax-check.ps1     # Quick syntax validation
     ├── Config.Tests.ps1
     ├── Logging.Tests.ps1
+    ├── MonitorLoop.Tests.ps1  # qbitstatic.ps1 decision logic, all calls mocked
     ├── PortDetector.Tests.ps1
     └── QBittorrentApi.Tests.ps1
 ```

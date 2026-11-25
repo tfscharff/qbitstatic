@@ -38,6 +38,95 @@ Describe "Config Module" {
         }
     }
 
+    Context "Custom and malformed config files" {
+        BeforeAll {
+            $script:CfgDir = Join-Path $env:TEMP "qbitstatic-cfg-$(Get-Random)"
+            New-Item -ItemType Directory -Path $script:CfgDir -Force | Out-Null
+        }
+
+        AfterAll {
+            Remove-Item $script:CfgDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\QBITSTATIC_TEST_DIR -ErrorAction SilentlyContinue
+        }
+
+        It "Maps every JSON field to its config key" {
+            $path = Join-Path $script:CfgDir "full.json"
+            @'
+{
+  "qbittorrent": { "exePath": "C:\\qbt\\qbt.exe", "webUrl": "http://host:9999", "credentialTarget": "target-x" },
+  "protonvpn": { "logPath": "C:\\logs\\client-logs.txt", "portPattern": "Port (\\d+)" },
+  "monitoring": { "pollIntervalSeconds": 15, "maxRetries": 4, "retryDelaySeconds": 2 },
+  "logging": { "directory": "C:\\qlogs", "fileName": "q.log", "maxSizeMB": 2, "checkInterval": 50 }
+}
+'@ | Set-Content $path
+
+            $c = Get-QbitstaticConfig -Path $path -Force
+
+            $c.QbtExePath | Should -Be "C:\qbt\qbt.exe"
+            $c.QbtWebUrl | Should -Be "http://host:9999"
+            $c.CredentialTarget | Should -Be "target-x"
+            $c.VpnLogPath | Should -Be "C:\logs\client-logs.txt"
+            $c.PortPattern | Should -Be "Port (\d+)"
+            $c.PollInterval | Should -Be 15
+            $c.MaxRetries | Should -Be 4
+            $c.RetryDelay | Should -Be 2
+            $c.LogDir | Should -Be "C:\qlogs"
+            $c.LogFile | Should -Be "q.log"
+            $c.LogMaxSizeMB | Should -Be 2
+            $c.LogCheckInterval | Should -Be 50
+            Get-ConfigPath | Should -Be $path
+        }
+
+        It "Expands a custom environment variable in path fields" {
+            $env:QBITSTATIC_TEST_DIR = "C:\expanded"
+            $path = Join-Path $script:CfgDir "env.json"
+            @'
+{
+  "qbittorrent": { "exePath": "%QBITSTATIC_TEST_DIR%\\qbt.exe" },
+  "protonvpn": { "logPath": "%QBITSTATIC_TEST_DIR%\\client-logs.txt" },
+  "logging": { "directory": "%QBITSTATIC_TEST_DIR%\\logs" }
+}
+'@ | Set-Content $path
+
+            $c = Get-QbitstaticConfig -Path $path -Force
+
+            $c.QbtExePath | Should -Be "C:\expanded\qbt.exe"
+            $c.VpnLogPath | Should -Be "C:\expanded\client-logs.txt"
+            $c.LogDir | Should -Be "C:\expanded\logs"
+        }
+
+        It "Throws on malformed JSON" {
+            $path = Join-Path $script:CfgDir "bad.json"
+            '{ "qbittorrent": { "webUrl": ' | Set-Content $path
+
+            { Get-QbitstaticConfig -Path $path -Force } | Should -Throw
+        }
+
+        It "Returns empty or null values for missing sections (no defaults applied)" {
+            $path = Join-Path $script:CfgDir "partial.json"
+            '{ "qbittorrent": { "webUrl": "http://localhost:8080" } }' | Set-Content $path
+
+            $c = Get-QbitstaticConfig -Path $path -Force
+
+            $c.QbtWebUrl | Should -Be "http://localhost:8080"
+            $c.VpnLogPath | Should -BeNullOrEmpty
+            $c.PollInterval | Should -BeNullOrEmpty
+            $c.MaxRetries | Should -BeNullOrEmpty
+            $c.LogMaxSizeMB | Should -BeNullOrEmpty
+        }
+
+        It "Ignores -Path while a cached config exists unless -Force is given" {
+            $pathA = Join-Path $script:CfgDir "a.json"
+            $pathB = Join-Path $script:CfgDir "b.json"
+            '{ "qbittorrent": { "webUrl": "http://a" } }' | Set-Content $pathA
+            '{ "qbittorrent": { "webUrl": "http://b" } }' | Set-Content $pathB
+
+            Get-QbitstaticConfig -Path $pathA -Force | Out-Null
+            (Get-QbitstaticConfig -Path $pathB).QbtWebUrl | Should -Be "http://a"
+            (Get-QbitstaticConfig -Path $pathB -Force).QbtWebUrl | Should -Be "http://b"
+        }
+    }
+
     Context "Configuration values" {
         BeforeAll {
             $configPath = Join-Path $PSScriptRoot "..\config.json"
